@@ -1,0 +1,312 @@
+---
+title: "Machine learning in remote sensing applications"
+subtitle: "With focus on mapping the area of applicability (AOA) of prediction models"
+author: "Hanna Meyer"
+date: "7/28/2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+This tutorial has two major aims: The first one is to show the general workflow of how land cover classifications (or similar tasks) based on satellite data can be performed in R using machine learning algorithms. 
+The second important aim is to show how to assess the area to which a spatial prediction model can be applied ("Area of applicability", AOA). This is relevant because in spatial predictive mapping, models are often applied to make predictions far beyond sampling locations (i.e. field observarions used to map a variable even on a global scale), where new locations might considerably differ in their environmental properties. However, areas in the predictor space without support of training data are problematic. The model has no knowledge about these environments and predictions for such areas have to be considered highly uncertain.
+
+### Get further help
+For further help on handling of raster and vector data in R see e.g. https://geocompr.github.io/. More information on the relevance of spatial validation strategies can be found in the previous OpenGeoHub recordings (https://www.youtube.com/watch?v=mkHlmYEzsVQ) as well as in e.g. [Meyer et al (2019)](https://doi.org/10.1016/j.ecolmodel.2019.108815). The methodology to estimate the AOA is described in [Meyer\&Pebesma (2020)](http://arxiv.org/abs/2005.07939)
+
+### Prediction task
+The example prediction task is to perfom a supervised land cover classification for the Münster in Germany.
+The dataset to do this includes selected spectral channels of a Sentinel-2 scene as well as derived artificial channels (NDVI as well as the standard deviation of the NDVI in a 5x5 pixel environment). As resposne (reference/ground truth) we use digitized polygons that were created on the basis of expert knowledge. 
+
+### How to start
+
+For this tutorial we need the raster package for processing of the satellite data as well as the caret package as a wrapper for machine learning (here: randomForest) algorithms. Sf is used for handling of the training data available as vector data (polygons). Mapview is used for spatial visualization of the data. CAST will be used to account for spatial dependencies during model validation as well as for the estimation of the AOA.
+
+```{r start, message=FALSE, warning=FALSE}
+rm(list=ls())
+#major required packages:
+library(raster)
+library(caret)
+library(mapview)
+library(sf)
+library(CAST)
+#additional required packages:
+library(tmap)
+library(latticeExtra)
+library(doParallel)
+library(parallel)
+library(Orcs)
+```
+
+## Data preparation
+
+### Load and explore the data
+To start with, let's load and explore the remote sensing raster data as well as the vector data that include the training sites.
+
+#### Raster data (predictor variables)
+
+```{r load, message=FALSE,warning=FALSE}
+sen_ms <- stack("data/Sen_Muenster.grd")
+print(sen_ms)
+
+```
+
+```{r rgbplots,echo=FALSE}
+
+rgbplot_ms <- spplot(sen_ms[[1]],  col.regions="transparent",sp.layout =rgb2spLayout(sen_ms[[1:3]], quantiles = c(0.02, 0.98), alpha = 1))
+
+sen_mr <- stack("data/Sen_Marburg.grd")
+rgbplot_mr <- spplot(sen_mr[[1]],  col.regions="transparent",sp.layout =rgb2spLayout(sen_mr[[1:3]], quantiles = c(0.02, 0.98), alpha = 1))
+
+```
+
+The RasterStack contains a subset of the optical data from Sentinel-2 (see band information here: https://en.wikipedia.org/wiki/Sentinel-2) given in scaled reflectances (B02-B11). In addition,the NDVI was calculated and spatial context is included as the standard deviation of the NDVI in a 5x5 pixel environment (NDVI_sd_5). 
+Let's plot the rasterStack to get an idea how the variables look like. 
+ 
+```{r visPredictors}
+plot(sen_ms)
+```
+
+#### Vector data (Response variable)
+The vector file is read as sf object. It contains the training sites of 7 Land cover classes. These are polygons (33 in total) that were digitized in QGIS on the basis of the Sentinel data and with support of an aerial image and using expert knowledge. They can be ragarded here as a ground truth for the land cover classification.
+
+```{r loadPoly}
+trainSites <- read_sf("data/trainingsites_muenster.gpkg")
+print(trainSites)
+```
+
+
+Using mapview's viewRGB function we can visualize the aerial image channels as true color composite in the geographical context and overlay it with the polygons. Click on the polygons to see which land cover class is assigned to a respective polygon.
+
+```{r visMV, warning=FALSE, message= FALSE}
+viewRGB(sen_ms, r = 3, g = 2, b = 1, map.types = "Esri.WorldImagery")+
+  mapview(trainSites)
+```
+
+#### Extract raster information
+
+In order to train a machine learning model between the spectral properties and the land cover class, we first need to create a data frame that contains the predictor variables at the location of the training sites as well as the corresponding class information. This data frame can be produced with the extract function. The resulting data frame contains the predictor variables for each pixel overlayed by the polygons. This data frame then still needs to be merged with the information on the land cover class from the sf object.
+
+```{r extract}
+extr <- extract(sen_ms, trainSites, df=TRUE)
+extr <- merge(extr, trainSites, by.x="ID", by.y="PolygonID")
+head(extr)
+```
+
+In order to speed things up, for this tutorial we will reduce the data. Therefore, from each training polygon only 5% of the pixels will be used for model training.
+Therefore, from each polygon 5% of the pixels are randomly drawn.
+
+```{r subset}
+set.seed(100)
+trainids <- createDataPartition(extr$ID,list=FALSE,p=0.05)
+trainDat <- extr[trainids,]
+```
+
+## Model training
+### Predictors and response
+
+For model training we need to define the predictor and response variables. As predictors we can use basically all information from the raster stack as we might assume they could all be meaningful for the differentiation between the land cover classes. As response variable we use the "Label" column of the data frame.
+
+```{r vars}
+predictors <- names(sen_ms)
+response <- "Label"
+```
+
+### Model training
+We then train a Random Forest model to lean how the classes can be distinguished based on the predictors (note: other algorithms would work as well. See https://topepo.github.io/caret/available-models.html for a list of algorithms available in caret). Caret's train function is doing this job. Before starting model trainign we can specify some control settings using trainControl. For hyperparameter tuning (mtry) as well as for error assessment we use a spatial 3-fold cross-validation. Therefore the training data are split into 3 folds but data from the same polygon are always grouped so that they never occur in both, training and testing. Also we make sure that each fold contains data from each land cover class. CAST's CreateSpacetimeFolds is doing this job when we specify the polygon ID and the class label.
+
+```{r trainctrl, warning=FALSE, message=FALSE}
+indices <- CreateSpacetimeFolds(trainDat,spacevar = "ID",k=3,class="Label")
+ctrl <- trainControl(method="cv", 
+                     index = indices$index,
+                     savePredictions = TRUE)
+```
+
+Model training is then performed using caret's train function. We specify "rf" as method, indicating that a Random Forest is applied. For model training we reduce the number of trees (ntree) to 75 to speed things up. Note that usually a larger number (>250) is appropriate. We use the Kappa index for validation.
+
+```{r train, warning=FALSE, message=FALSE}
+# train the model
+set.seed(100)
+model <- train(trainDat[,predictors],
+               trainDat[,response],
+               method="rf",
+               metric="Kappa",
+               trControl=ctrl,
+               importance=TRUE,
+               ntree=75)
+print(model)
+```
+
+
+### Model validation
+When we print the model (see above) we get a summary of the prediction performance as the average Kappa and Accuracy of the three spatial folds. Looking at all cross-validated predictions together we can get the "global" model performance.
+
+```{r valid_defaultmodel}
+# get all cross-validated predictions:
+cvPredictions <- model$pred[model$pred$mtry==model$bestTune$mtry,]
+# calculate cross table:
+table(cvPredictions$pred,cvPredictions$obs)
+```
+
+We see that the performance is very high and that only minor false classifications occur.
+
+### Model prediction
+To perform the classification we can use the trained model and apply it to each pixel of the raster stack using the predict function. Then we can then create a map with meaningful colors of the predicted land cover using the tmap package.
+
+```{r predict, message=FALSE, warning=FALSE}
+prediction <- predict(sen_ms,model)
+cols <- c("sandybrown", "green", "darkred", "blue", "forestgreen", "lightgreen", "red")
+
+tm_shape(deratify(prediction)) +
+  tm_raster(palette = cols,title = "LUC")+
+  tm_scale_bar(bg.color="white",bg.alpha=0.75)+
+  tm_layout(legend.bg.color = "white",
+            legend.bg.alpha = 0.75)
+```
+
+## Area of Applicability
+We have seen that technically, the trained model can be applied to the entire area of interest (and beyond...as long as the sentinel predictors are available which they are, even globally). But we should assess if we SHOULD apply our model to the entire area. The model should only be applied to locations that feature predictor properties that are comparable to those of the training data. If dissimilarity to the training data is larger than the disimmilarity within the training data, the model should not be applied to this location.
+
+The calculation of the AOA is quite time consuming. To make a bit faster we use a parallelization.
+
+```{r aoa}
+cl <- makeCluster(4)
+registerDoParallel(cl)
+AOA <- aoa(sen_ms,model,cl=cl)
+plot(AOA)
+```
+
+The result of the aoa function has two layers: the dissimilarity index (DI) and the area of applicability (AOA). The DI can take values from 0 to Inf, where 0 means that a location has predictor properties that are identical to properties observed in the training data. With increasing values the dissimilarity increases. The AOA has only two values: 0 and 1. 0 means that a location is outside the area of applicability, 1 means that the model is inside the area of applicability. Find more information on how the AOA is derived in [Meyer\&Pebesma (2020)](http://arxiv.org/abs/2005.07939).
+
+
+```{r aoa_vis, echo=FALSE}
+predplot <- spplot(deratify(prediction), col.regions=cols, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
+predplotaoa <- spplot(deratify(prediction), col.regions=cols)+
+spplot(AOA$AOA,col.regions=c("grey","transparent"))
+latticeCombineGrid(list(predplot,predplotaoa,rgbplot_ms),layout=c(2,2))
+```
+
+The figure above shows the predictions (topleft) as well as the predictions ONLY for the AOA (topright. Locations outside the AOA are shown in grey). For comparison the RGB composite is shown here.
+We see that the model can be applied to most parts of Münster, however there are some locations (especially in the south-west) that are too different in their predictor properties so that we should exclude those predictions from our prediction result.
+
+
+## Model transfer
+
+The idea of the AOA is probably getting even more obvious when we use the trained model to make predictions for a completely new area (model transfer).
+This seems reasonable at the example of land cover mapping because we might assume that land cover classes "look" similar (i.e. have similar spectral properties) in other locations as well.
+So let's apply the model to a new area: Marburg (Germany) and use the AOA concept to see if we can apply our model there.
+
+To do this we use a prepared Sentinel-2 dataset from this new location and apply the model trained in Münster to make predictions for Marburg.
+
+
+```{r transfer}
+sen_mr <- stack("data/Sen_Marburg.grd")
+prediction_mr <- predict(sen_mr,model)
+AOA <- aoa(sen_mr,model,cl=cl)
+```
+
+```{r transfer_vis, echo=FALSE}
+predplot <- spplot(deratify(prediction_mr), col.regions=cols, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
+predplotaoa <- spplot(deratify(prediction_mr), col.regions=cols)+
+spplot(AOA$AOA,col.regions=c("grey","transparent"))
+latticeCombineGrid(list(predplot,predplotaoa,rgbplot_mr),layout=c(2,2))
+```
+
+We see that while the gernal patterns in the predictions appear to make sense, large parts of the area are outside the applicability of the model.
+This means that the predictor properties present in Marburg are not sufficiently covered by the training data from the Münster area.
+
+Looking at the color composite this becomes understandable. As an example focusing on the forest area we see that the areas that are outside the AOA appear considerably darker in the color composite. If we had a look into these areas in more detail we would see that these areas are coniferous forest, a land cover class frequently found around Marburg but not present in Münster.
+
+### Learn from more locations
+
+So apparently transfering models is problematic if we cannot guarantee that all land cover classes are covered. There are other problems that come on top. To mention just a few, atmospheric conditions of the time of image acquisition, shifts in the season, as well as biased training sites could limit the ability of a trained model to make predictions beyond the conditions of training.
+
+It might therefore be a good idea that, if a model is intended for transfer, that we train from different areas and conditions.
+
+Let's have a look how this can change our prediction results. The following datasets includes training data sampled in 15 different areas in Germany, each using a Sentinel-2 image from different summer dates as predictors. Each location was sampled by a different person so that training sites are expected to be unbiased. Note that Marburg (and the area around it) was not part of this survey!
+
+```{r multiclocations, message=FALSE, warning=FALSE}
+multiloc <- readRDS("data/trainingdata_allareas.rds")
+set.seed(100)
+trainids <- createDataPartition(multiloc$uniquepoly,list=FALSE,p=0.005)
+trainDat <- multiloc[trainids,]
+trainDat <- trainDat[complete.cases(trainDat),]
+head(trainDat)
+unique(trainDat$Label)
+```
+
+Note that more Land cover classes occur in this larger dataset as a result of a higher variability found when we look into more than just a single location.
+
+We will next use this dataset to train a new model, make a prediction and estimate the AOA using the same approach as explained above.
+
+```{r multiclocations2}
+set.seed(100)
+indices <- CreateSpacetimeFolds(trainDat,spacevar = "ID",k=3,class="Label")
+ctrl <- trainControl(method="cv", 
+                     index = indices$index,
+                     savePredictions = TRUE)
+set.seed(100)
+model <- train(trainDat[,predictors],
+               trainDat[,response],
+               method="rf",
+               metric="Kappa",
+               trControl=ctrl,
+               importance=TRUE,
+               ntree=75)
+print(model)
+
+prediction_mr <- predict(sen_mr,model)
+AOA <- aoa(sen_mr,model,cl=cl)
+```
+
+Note that the Accuracy and Kappa are lower which is not surprising because more (challenging) classes are to be predicted.
+
+```{r multiclocations_vis, echo=FALSE}
+cols2 <- c("black", "darkgreen", "darkolivegreen", "sandybrown", "green", "white","pink","darkred","blue", "forestgreen", "brown", "lightgreen", "darkslateblue", "beige", "darkblue", "lightblue", "red", "lightseagreen")
+
+predplot <- spplot(deratify(prediction_mr),col.regions=cols2, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
+predplotaoa <- spplot(deratify(prediction_mr),col.regions=cols2)+
+spplot(AOA$AOA,col.regions=c("grey","transparent"))
+
+latticeCombineGrid(list(predplot,predplotaoa,rgbplot_mr),layout=c(2,2))
+```
+
+As we can see, now the predictions for Marburg look considerably better, the delineation of forest types looks reasonable and also other classes like the river could be detected. There are only very few locations left that are outside the AOA.
+
+Since the model trained across several locations is successfull to make predictions for the new unseen area of Marburg, it might be intertesting to see if this model can also make better predictions for Münster. 
+
+
+```{r multiclocations_ms}
+prediction <- predict(sen_ms,model)
+AOA <- aoa(sen_ms,model,cl=cl)
+```
+
+
+```{r multiclocations_msvis, echo=FALSE}
+predplot <- spplot(deratify(prediction),col.regions=cols2, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
+predplotaoa <- spplot(deratify(prediction),col.regions=cols2)+
+spplot(AOA$AOA,col.regions=c("grey","transparent"))
+latticeCombineGrid(list(predplot,predplotaoa,rgbplot_ms),layout=c(2,2))
+```
+
+We can see that if we use a model that is trained on different areas and under different conditions we can improve our prediction and can now make predictions for nearly all locations that have been outside the AOA before. 
+
+## Summary
+* This tutorial has shown how to perform a remote sensing based land cover classification in R.
+* We identified the area of applicability (AOA) of the trained model to make sure that we don't make predictions for locations that model has no knowledge about.
+* We transfered the model to a new area and concluded that a transfer is only possible when the model has knowledge about the new environment. Again, the AOA method was applied to identify the unknown locations.
+* We have seen that transferability can be improved when a model is trained on more hereogeneous data. 
+* Communicating the AOA is important to avoid mis-planning when predictive mapping is used as a tool for decision making (e.g. in the context of nature conservation), as well as to avoid propagation of massive errors when spatial predictions are used as input for subsequent modelling. 
+* Note that the presented dissimilarity index can also be used in the context of guided training data sampling with the aim to increase the AOA of a prediction model
+
+
+
+#### Acknowledgement
+Thanks to the participants of the summer semester course "Remote sensing and machine learning" at ILÖK&IFGI in Münster for compiling the multi-location training dataset!
