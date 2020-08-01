@@ -129,21 +129,24 @@ ctrl <- trainControl(method="cv",
                      savePredictions = TRUE)
 ```
 
-Model training is then performed using caret's train function. We specify "rf" as method, indicating that a Random Forest is applied. For model training we reduce the number of trees (ntree) to 75 to speed things up. Note that usually a larger number (>250) is appropriate. We use the Kappa index for validation.
+Model training is then performed using caret's train function. However we use a wrapper around it that is selecting the predictor variables which are relevant for making predictions on new spatial locations. (forward feature selection, fss)
+We specify "rf" as method, indicating that a Random Forest is applied. For model training we reduce the number of trees (ntree) to 75 to speed things up. Note that usually a larger number (>250) is appropriate. We use the Kappa index for validation.
 
-```{r train, warning=FALSE, message=FALSE}
+```{r train, warning=FALSE, message=FALSE, results='hide'}
 # train the model
 set.seed(100)
-model <- train(trainDat[,predictors],
+model <- ffs(trainDat[,predictors],
                trainDat[,response],
                method="rf",
                metric="Kappa",
                trControl=ctrl,
                importance=TRUE,
                ntree=75)
-print(model)
 ```
 
+```{r trainresult}
+print(model)
+```
 
 ### Model validation
 When we print the model (see above) we get a summary of the prediction performance as the average Kappa and Accuracy of the three spatial folds. Looking at all cross-validated predictions together we can get the "global" model performance.
@@ -246,24 +249,27 @@ Note that more Land cover classes occur in this larger dataset as a result of a 
 
 We will next use this dataset to train a new model, make a prediction and estimate the AOA using the same approach as explained above.
 
-```{r multiclocations2}
+```{r multiclocations2, message=FALSE, results='hide'}
 set.seed(100)
 indices <- CreateSpacetimeFolds(trainDat,spacevar = "ID",k=3,class="Label")
 ctrl <- trainControl(method="cv", 
                      index = indices$index,
                      savePredictions = TRUE)
 set.seed(100)
-model <- train(trainDat[,predictors],
+model <- ffs(trainDat[,predictors],
                trainDat[,response],
                method="rf",
                metric="Kappa",
                trControl=ctrl,
                importance=TRUE,
                ntree=75)
-print(model)
 
 prediction_mr <- predict(sen_mr,model)
 AOA <- aoa(sen_mr,model,cl=cl)
+```
+
+```{r multiclocations3}
+print(model)
 ```
 
 Note that the Accuracy and Kappa are lower which is not surprising because more (challenging) classes are to be predicted.
