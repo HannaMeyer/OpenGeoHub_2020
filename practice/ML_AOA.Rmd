@@ -30,7 +30,6 @@ The dataset to do this includes selected spectral channels of a Sentinel-2 scene
 For this tutorial we need the raster package for processing of the satellite data as well as the caret package as a wrapper for machine learning (here: randomForest) algorithms. Sf is used for handling of the training data available as vector data (polygons). Mapview is used for spatial visualization of the data. CAST will be used to account for spatial dependencies during model validation as well as for the estimation of the AOA.
 
 ```{r start, message=FALSE, warning=FALSE}
-rm(list=ls())
 #major required packages:
 library(raster)
 library(caret)
