@@ -31,7 +31,7 @@ For this tutorial we need the raster package for processing of the satellite dat
 
 ```{r start, message=FALSE, warning=FALSE}
 #major required packages:
-library(raster)
+library(stars)
 library(caret)
 library(mapview)
 library(sf)
@@ -52,25 +52,18 @@ To start with, let's load and explore the remote sensing raster data as well as 
 #### Raster data (predictor variables)
 
 ```{r load, message=FALSE,warning=FALSE}
-sen_ms <- stack("data/Sen_Muenster.grd")
-print(sen_ms)
-
-```
-
-```{r rgbplots,echo=FALSE}
-
-rgbplot_ms <- spplot(sen_ms[[1]],  col.regions="transparent",sp.layout =rgb2spLayout(sen_ms[[1:3]], quantiles = c(0.02, 0.98), alpha = 1))
-
-sen_mr <- stack("data/Sen_Marburg.grd")
-rgbplot_mr <- spplot(sen_mr[[1]],  col.regions="transparent",sp.layout =rgb2spLayout(sen_mr[[1:3]], quantiles = c(0.02, 0.98), alpha = 1))
-
+sen_ms <- read_stars("data/Sen_Muenster.grd") %>%
+st_set_dimensions("band", c("B02", "B03", "B04", "B08", "B06", "B07", "B11", "NDVI", "NDVI_sd_5")) %>%
+  split("band")
+sen_ms
 ```
 
 The RasterStack contains a subset of the optical data from Sentinel-2 (see band information here: https://en.wikipedia.org/wiki/Sentinel-2) given in scaled reflectances (B02-B11). In addition,the NDVI was calculated and spatial context is included as the standard deviation of the NDVI in a 5x5 pixel environment (NDVI_sd_5). 
-Let's plot the rasterStack to get an idea how the variables look like. 
+Let's plot the rasterStack to get an idea how the variables look like; the
+following plot histogram (quantile) stretches all bands: 
  
 ```{r visPredictors}
-plot(sen_ms)
+plot(merge(sen_ms), join_zlim = FALSE)
 ```
 
 #### Vector data (Response variable)
@@ -85,17 +78,20 @@ print(trainSites)
 Using mapview's viewRGB function we can visualize the aerial image channels as true color composite in the geographical context and overlay it with the polygons. Click on the polygons to see which land cover class is assigned to a respective polygon.
 
 ```{r visMV, warning=FALSE, message= FALSE}
-viewRGB(sen_ms, r = 3, g = 2, b = 1, map.types = "Esri.WorldImagery")+
-  mapview(trainSites)
+viewRGB(as(sen_ms, "Raster"), r = 3, g = 2, b = 1, map.types = "Esri.WorldImagery") + mapview(trainSites)
 ```
 
-#### Extract raster information
+#### Extract pixel information
 
 In order to train a machine learning model between the spectral properties and the land cover class, we first need to create a data frame that contains the predictor variables at the location of the training sites as well as the corresponding class information. This data frame can be produced with the extract function. The resulting data frame contains the predictor variables for each pixel overlayed by the polygons. This data frame then still needs to be merged with the information on the land cover class from the sf object.
 
 ```{r extract}
-extr <- extract(sen_ms, trainSites, df=TRUE)
-extr <- merge(extr, trainSites, by.x="ID", by.y="PolygonID")
+st_crs(sen_ms) = st_crs(trainSites) # shouldn't be needed!
+sen_ms$PolygonID = st_rasterize(trainSites["PolygonID"], sen_ms[1] * NA)
+extr <- sen_ms %>%
+  as.data.frame() %>%
+  na.omit() %>%
+  merge(trainSites)
 head(extr)
 ```
 
@@ -104,7 +100,7 @@ Therefore, from each polygon 5% of the pixels are randomly drawn.
 
 ```{r subset}
 set.seed(100)
-trainids <- createDataPartition(extr$ID,list=FALSE,p=0.05)
+trainids <- createDataPartition(extr$PolygonID,list=FALSE,p=0.05)
 trainDat <- extr[trainids,]
 ```
 
@@ -114,15 +110,15 @@ trainDat <- extr[trainids,]
 For model training we need to define the predictor and response variables. As predictors we can use basically all information from the raster stack as we might assume they could all be meaningful for the differentiation between the land cover classes. As response variable we use the "Label" column of the data frame.
 
 ```{r vars}
-predictors <- names(sen_ms)
+predictors <- names(sen_ms)[1:9]
 response <- "Label"
 ```
 
 ### Model training
-We then train a Random Forest model to lean how the classes can be distinguished based on the predictors (note: other algorithms would work as well. See https://topepo.github.io/caret/available-models.html for a list of algorithms available in caret). Caret's train function is doing this job. Before starting model trainign we can specify some control settings using trainControl. For hyperparameter tuning (mtry) as well as for error assessment we use a spatial 3-fold cross-validation. Therefore the training data are split into 3 folds but data from the same polygon are always grouped so that they never occur in both, training and testing. Also we make sure that each fold contains data from each land cover class. CAST's CreateSpacetimeFolds is doing this job when we specify the polygon ID and the class label.
+We then train a Random Forest model to learn how the classes can be distinguished based on the predictors (note: other algorithms would work as well. See https://topepo.github.io/caret/available-models.html for a list of algorithms available in caret). Caret's train function is doing this job. Before starting model trainign we can specify some control settings using trainControl. For hyperparameter tuning (mtry) as well as for error assessment we use a spatial 3-fold cross-validation. Therefore the training data are split into 3 folds but data from the same polygon are always grouped so that they never occur in both, training and testing. Also we make sure that each fold contains data from each land cover class. CAST's CreateSpacetimeFolds is doing this job when we specify the polygon ID and the class label.
 
 ```{r trainctrl, warning=FALSE, message=FALSE}
-indices <- CreateSpacetimeFolds(trainDat,spacevar = "ID",k=3,class="Label")
+indices <- CreateSpacetimeFolds(trainDat, spacevar = "PolygonID", k = 3, class = "Label")
 ctrl <- trainControl(method="cv", 
                      index = indices$index,
                      savePredictions = TRUE)
@@ -163,10 +159,10 @@ We see that the performance is very high and that only minor false classificatio
 To perform the classification we can use the trained model and apply it to each pixel of the raster stack using the predict function. Then we can then create a map with meaningful colors of the predicted land cover using the tmap package.
 
 ```{r predict, message=FALSE, warning=FALSE}
-prediction <- predict(sen_ms,model)
+prediction <- predict(sen_ms, model)
 cols <- c("sandybrown", "green", "darkred", "blue", "forestgreen", "lightgreen", "red")
 
-tm_shape(deratify(prediction)) +
+tm_shape(prediction) +
   tm_raster(palette = cols,title = "LUC")+
   tm_scale_bar(bg.color="white",bg.alpha=0.75)+
   tm_layout(legend.bg.color = "white",
@@ -181,18 +177,22 @@ The calculation of the AOA is quite time consuming. To make a bit faster we use 
 ```{r aoa}
 cl <- makeCluster(4)
 registerDoParallel(cl)
-AOA <- aoa(sen_ms,model,cl=cl)
-plot(AOA)
+AOA <- aoa(sen_ms, model, cl = cl)
+plot(AOA[1], breaks = "quantile")
+plot(AOA[2])
 ```
 
-The result of the aoa function has two layers: the dissimilarity index (DI) and the area of applicability (AOA). The DI can take values from 0 to Inf, where 0 means that a location has predictor properties that are identical to properties observed in the training data. With increasing values the dissimilarity increases. The AOA has only two values: 0 and 1. 0 means that a location is outside the area of applicability, 1 means that the model is inside the area of applicability. Find more information on how the AOA is derived in [Meyer\&Pebesma (2020)](http://arxiv.org/abs/2005.07939).
+The result of the aoa function has two raster layers: the dissimilarity index (DI) and the area of applicability (AOA). DI takes values of 0 or larger, where 0 means that a location has predictor values that are identical to values observed in the training data. With increasing values of DI the dissimilarity increases. AOA has two values: 0 or 1; 0 indicating locations outside the area of applicability, 1 indicating the area of applicability. Find more information on how the AOA is derived in [Meyer\&Pebesma (2020)](http://arxiv.org/abs/2005.07939).
 
 
 ```{r aoa_vis, echo=FALSE}
-predplot <- spplot(deratify(prediction), col.regions=cols, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
-predplotaoa <- spplot(deratify(prediction), col.regions=cols)+
-spplot(AOA$AOA,col.regions=c("grey","transparent"))
-latticeCombineGrid(list(predplot,predplotaoa,rgbplot_ms),layout=c(2,2))
+p = prediction[1]
+aoa = AOA["AOA"]
+p[aoa == 0] = NA # so they are plotted "white" (transparent)
+prediction$within_aoa = p
+plot(merge(prediction), col = cols, key.pos = 4, key.width = lcm(3),
+    box_col = 'black')
+plot(st_rgb(merge(sen_ms[c(3,2,1)]), probs=c(.02, .98)))
 ```
 
 The figure above shows the predictions (topleft) as well as the predictions ONLY for the AOA (topright. Locations outside the AOA are shown in grey). For comparison the RGB composite is shown here.
@@ -209,16 +209,20 @@ To do this we use a prepared Sentinel-2 dataset from this new location and apply
 
 
 ```{r transfer}
-sen_mr <- stack("data/Sen_Marburg.grd")
-prediction_mr <- predict(sen_mr,model)
-AOA <- aoa(sen_mr,model,cl=cl)
+sen_mr <- stack("data/Sen_Marburg.grd") %>%
+  st_as_stars() %>%
+  split("band")
+prediction_mr <- predict(sen_mr, model)
+AOA <- aoa(sen_mr, model, cl = cl)
 ```
 
 ```{r transfer_vis, echo=FALSE}
-predplot <- spplot(deratify(prediction_mr), col.regions=cols, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
-predplotaoa <- spplot(deratify(prediction_mr), col.regions=cols)+
-spplot(AOA$AOA,col.regions=c("grey","transparent"))
-latticeCombineGrid(list(predplot,predplotaoa,rgbplot_mr),layout=c(2,2))
+aoa = prediction_mr
+aoa[AOA["AOA"] == 0] = NA
+prediction_mr$within_aoa = aoa
+plot(merge(prediction_mr), col = cols, key.pos = 4, key.width = lcm(3),
+    box_col = 'black')
+plot(st_rgb(merge(sen_mr[c(3,2,1)]), probs=c(.02, .98)))
 ```
 
 We see that while the gernal patterns in the predictions appear to make sense, large parts of the area are outside the applicability of the model.
@@ -250,7 +254,7 @@ We will next use this dataset to train a new model, make a prediction and estima
 
 ```{r multiclocations2, message=FALSE, results='hide'}
 set.seed(100)
-indices <- CreateSpacetimeFolds(trainDat,spacevar = "ID",k=3,class="Label")
+indices <- CreateSpacetimeFolds(trainDat, spacevar = "uniquepoly", k = 3, class = "Label")
 ctrl <- trainControl(method="cv", 
                      index = indices$index,
                      savePredictions = TRUE)
@@ -263,8 +267,8 @@ model <- ffs(trainDat[,predictors],
                importance=TRUE,
                ntree=75)
 
-prediction_mr <- predict(sen_mr,model)
-AOA <- aoa(sen_mr,model,cl=cl)
+prediction_mr <- predict(sen_mr, model)
+AOA <- aoa(sen_mr, model, cl = cl)
 ```
 
 ```{r multiclocations3}
@@ -276,11 +280,17 @@ Note that the Accuracy and Kappa are lower which is not surprising because more 
 ```{r multiclocations_vis, echo=FALSE}
 cols2 <- c("black", "darkgreen", "darkolivegreen", "sandybrown", "green", "white","pink","darkred","blue", "forestgreen", "brown", "lightgreen", "darkslateblue", "beige", "darkblue", "lightblue", "red", "lightseagreen")
 
-predplot <- spplot(deratify(prediction_mr),col.regions=cols2, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
-predplotaoa <- spplot(deratify(prediction_mr),col.regions=cols2)+
-spplot(AOA$AOA,col.regions=c("grey","transparent"))
+#predplot <- spplot(deratify(prediction_mr),col.regions=cols2, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
+#predplotaoa <- spplot(deratify(prediction_mr),col.regions=cols2)+
+#spplot(AOA$AOA,col.regions=c("grey","transparent"))
 
-latticeCombineGrid(list(predplot,predplotaoa,rgbplot_mr),layout=c(2,2))
+#latticeCombineGrid(list(predplot,predplotaoa,rgbplot_mr),layout=c(2,2))
+aoa = AOA["AOA"]
+pr = prediction_mr[1]
+pr[aoa == 0] = NA
+prediction_mr$within_aoa = pr
+plot(merge(prediction_mr), col = cols2, key.length=1,key.width=lcm(3.5), key.pos=4)
+plot(st_rgb(merge(sen_mr[c(3,2,1)]), probs=c(.02, .98)))
 ```
 
 As we can see, now the predictions for Marburg look considerably better, the delineation of forest types looks reasonable and also other classes like the river could be detected. There are only very few locations left that are outside the AOA.
@@ -290,15 +300,21 @@ Since the model trained across several locations is successfull to make predicti
 
 ```{r multiclocations_ms}
 prediction <- predict(sen_ms,model)
-AOA <- aoa(sen_ms,model,cl=cl)
+AOA <- aoa(sen_ms, model, cl = cl)
 ```
 
 
 ```{r multiclocations_msvis, echo=FALSE}
-predplot <- spplot(deratify(prediction),col.regions=cols2, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
-predplotaoa <- spplot(deratify(prediction),col.regions=cols2)+
-spplot(AOA$AOA,col.regions=c("grey","transparent"))
-latticeCombineGrid(list(predplot,predplotaoa,rgbplot_ms),layout=c(2,2))
+#predplot <- spplot(deratify(prediction),col.regions=cols2, main = list(label="Prediction (left), prediction only for the AOA (right) and RGB composite (bottom)",cex=0.8))
+#predplotaoa <- spplot(deratify(prediction),col.regions=cols2)+
+#spplot(AOA$AOA,col.regions=c("grey","transparent"))
+#latticeCombineGrid(list(predplot,predplotaoa,rgbplot_ms),layout=c(2,2))
+aoa = AOA["AOA"]
+pr = prediction[1]
+pr[aoa == 0] = NA
+prediction$within_aoa = pr
+plot(merge(prediction), col = cols2, key.length=1,key.width=lcm(3.5), key.pos=4)
+plot(st_rgb(merge(sen_ms[c(3,2,1)]), probs=c(.02, .98)))
 ```
 
 We can see that if we use a model that is trained on different areas and under different conditions we can improve our prediction and can now make predictions for nearly all locations that have been outside the AOA before. 
@@ -310,8 +326,6 @@ We can see that if we use a model that is trained on different areas and under d
 * We have seen that transferability can be improved when a model is trained on more hereogeneous data. 
 * Communicating the AOA is important to avoid mis-planning when predictive mapping is used as a tool for decision making (e.g. in the context of nature conservation), as well as to avoid propagation of massive errors when spatial predictions are used as input for subsequent modelling. 
 * Note that the presented dissimilarity index can also be used in the context of guided training data sampling with the aim to increase the AOA of a prediction model
-
-
 
 #### Acknowledgement
 Thanks to the participants of the summer semester course "Remote sensing and machine learning" at ILÖK&IFGI in Münster for compiling the multi-location training dataset!
