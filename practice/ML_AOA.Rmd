@@ -18,9 +18,6 @@ knitr::opts_chunk$set(echo = TRUE)
 This tutorial has two major aims: The first one is to show the general workflow of how land cover classifications (or similar tasks) based on satellite data can be performed in R using machine learning algorithms. 
 The second important aim is to show how to assess the area to which a spatial prediction model can be applied ("Area of applicability", AOA). This is relevant because in spatial predictive mapping, models are often applied to make predictions far beyond sampling locations (i.e. field observarions used to map a variable even on a global scale), where new locations might considerably differ in their environmental properties. However, areas in the predictor space without support of training data are problematic. The model has no knowledge about these environments and predictions for such areas have to be considered highly uncertain.
 
-### Get further help
-For further help on handling of raster and vector data in R see e.g. https://geocompr.github.io/. More information on the relevance of spatial validation strategies can be found in the previous OpenGeoHub recordings (https://www.youtube.com/watch?v=mkHlmYEzsVQ) as well as in e.g. [Meyer et al (2019)](https://doi.org/10.1016/j.ecolmodel.2019.108815). The methodology to estimate the AOA is described in [Meyer\&Pebesma (2020)](http://arxiv.org/abs/2005.07939)
-
 ### Prediction task
 The example prediction task is to perfom a supervised land cover classification for the Münster in Germany.
 The dataset to do this includes selected spectral channels of a Sentinel-2 scene as well as derived artificial channels (NDVI as well as the standard deviation of the NDVI in a 5x5 pixel environment). As resposne (reference/ground truth) we use digitized polygons that were created on the basis of expert knowledge. 
@@ -141,6 +138,7 @@ model <- ffs(trainDat[,predictors],
 
 ```{r trainresult}
 print(model)
+plot(varImp(model))
 ```
 
 ### Model validation
@@ -248,7 +246,7 @@ head(trainDat)
 unique(trainDat$Label)
 ```
 
-Note that more Land cover classes occur in this larger dataset as a result of a higher variability found when we look into more than just a single location.
+Note that more Land cover classes occur in this larger dataset as a result of a higher variability found when we look into more than just a single location (most of them however won't occur in Marburg and Münster).
 
 We will next use this dataset to train a new model, make a prediction and estimate the AOA using the same approach as explained above.
 
@@ -317,7 +315,7 @@ plot(merge(prediction), col = cols2, key.length=1,key.width=lcm(3.5), key.pos=4)
 plot(st_rgb(merge(sen_ms[c(3,2,1)]), probs=c(.02, .98)))
 ```
 
-We can see that if we use a model that is trained on different areas and under different conditions we can improve our prediction and can now make predictions for nearly all locations that have been outside the AOA before. 
+We can see that if we use a model that is trained on different areas and under different conditions we can improve our prediction and can now make predictions for entire Münster. No areas are outside the AOA anymore.
 
 ## Summary
 * This tutorial has shown how to perform a remote sensing based land cover classification in R.
@@ -327,5 +325,6 @@ We can see that if we use a model that is trained on different areas and under d
 * Communicating the AOA is important to avoid mis-planning when predictive mapping is used as a tool for decision making (e.g. in the context of nature conservation), as well as to avoid propagation of massive errors when spatial predictions are used as input for subsequent modelling. 
 * Note that the presented dissimilarity index can also be used in the context of guided training data sampling with the aim to increase the AOA of a prediction model
 
-#### Acknowledgement
-Thanks to the participants of the summer semester course "Remote sensing and machine learning" at ILÖK&IFGI in Münster for compiling the multi-location training dataset!
+=======
+### Get further help
+For further help on handling of raster and vector data in R see e.g. https://geocompr.github.io/. More information on the relevance of spatial validation strategies can be found in the previous OpenGeoHub recordings (https://www.youtube.com/watch?v=mkHlmYEzsVQ) as well as in e.g. [Meyer et al (2019)](https://doi.org/10.1016/j.ecolmodel.2019.108815). The methodology to estimate the AOA is described in [Meyer\&Pebesma (2020)](http://arxiv.org/abs/2005.07939)
