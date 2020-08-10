@@ -83,7 +83,6 @@ viewRGB(as(sen_ms, "Raster"), r = 3, g = 2, b = 1, map.types = "Esri.WorldImager
 In order to train a machine learning model between the spectral properties and the land cover class, we first need to create a data frame that contains the predictor variables at the location of the training sites as well as the corresponding class information. This data frame can be produced with the extract function. The resulting data frame contains the predictor variables for each pixel overlayed by the polygons. This data frame then still needs to be merged with the information on the land cover class from the sf object.
 
 ```{r extract}
-st_crs(sen_ms) = st_crs(trainSites) # shouldn't be needed!
 sen_ms$PolygonID = st_rasterize(trainSites["PolygonID"], sen_ms[1] * NA)
 extr <- sen_ms %>%
   as.data.frame() %>%
