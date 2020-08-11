@@ -187,9 +187,25 @@ p = prediction[1]
 aoa = AOA["AOA"]
 p[aoa == 0] = NA # so they are plotted "white" (transparent)
 prediction$within_aoa = p
-plot(merge(prediction), col = cols, key.pos = 4, key.width = lcm(3),
-    box_col = 'black')
-plot(st_rgb(merge(sen_ms[c(3,2,1)]), probs=c(.02, .98)))
+pr = merge(prediction)
+x = as.character(pr[[1]])
+x[is.na(x)] = "Outside AOA"
+pr[[1]] = structure(factor(x, levels = c(levels(pr[[1]]), "Outside AOA")),
+                    dim = dim(pr[[1]]))
+cls = apply(col2rgb(c(cols, "grey")), 2, FUN = function(x) 
+  rgb(x[1],x[2],x[3],maxColorValue=255))
+g0 = ggplot() + 
+    coord_equal() + 
+    theme_void() +
+    scale_x_discrete(expand=c(0,0)) +
+    scale_y_discrete(expand=c(0,0))
+g1 = g0 + geom_stars(data = setNames(pr," ")) +
+  scale_fill_manual(values=cls) + facet_wrap(~X1)
+rgb_ms = st_rgb(merge(sen_ms[c(3,2,1)]), probs=c(.02, .98))
+g2 = g0 + geom_stars(data = rgb_ms) + scale_fill_identity() +
+  theme(legend.position = "none")
+library(gridExtra)
+grid.arrange(g1, g2, layout_matrix = rbind(c(1,1),c(NA,NA),c(2,NA)), heights=c(1,.05,1))
 ```
 
 The figure above shows the predictions (topleft) as well as the predictions ONLY for the AOA (topright. Locations outside the AOA are shown in grey). For comparison the RGB composite is shown here.
