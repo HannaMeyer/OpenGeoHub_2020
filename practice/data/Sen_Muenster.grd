@@ -8,7 +8,7 @@ xmin=400620
 ymin=5753560
 xmax=408600
 ymax=5760200
-projection=+proj=utm +zone=32 +ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs
+projection=+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs
 [data]
 datatype=FLT4S
 byteorder=little
